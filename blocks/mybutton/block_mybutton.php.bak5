@@ -1,0 +1,336 @@
+<?php
+defined('MOODLE_INTERNAL') || die();
+
+//////////sudah sukses redirect ke duitku sesuai pilihan paket
+
+class block_mybutton extends block_base {
+
+    public function init(): void {
+        $this->title = get_string('pluginname', 'block_mybutton');
+    }
+
+    // Tampilkan hanya di halaman course.
+    public function applicable_formats(): array {
+        return [
+            'course-view' => true,
+            'site-index'  => false,
+            'mod'         => false,
+            'my'          => false,
+        ];
+    }
+
+    public function instance_allow_multiple(): bool {
+        return false;
+    }
+
+    /**
+     * Format detik menjadi string ringkas: "X hari Y jam Z menit"
+     */
+    private function format_duration_brief(int $seconds): string {
+        if ($seconds <= 0) {
+            return '0 menit';
+        }
+        $minutes = intdiv($seconds, 60);
+        $seconds = $seconds % 60;
+
+        $hours   = intdiv($minutes, 60);
+        $minutes = $minutes % 60;
+
+        $days    = intdiv($hours, 24);
+        $hours   = $hours % 24;
+
+        $parts = [];
+        if ($days > 0)   { $parts[] = $days . ' hari-2'; }
+        if ($hours > 0)  { $parts[] = $hours . ' jam'; }
+        if ($minutes > 0 || empty($parts)) { $parts[] = $minutes . ' menit'; }
+
+        return implode(' ', $parts);
+    }
+
+    /**
+     * Ambil opsi paket dari custom field course "billing_options"
+     * Format per baris: key|label|price(|days)
+     * Contoh baris:
+     *   onetime|1x|25000|0
+     *   monthly|1 bulan|50000|30
+     *   yearly|1 tahun|600000|365
+     *
+     * @return array<string,array{label:string,price:int,days:int}>
+     */
+    private function get_billing_options(int $courseid): array {
+        $options = [];
+    
+        // Siapkan dir log diagnostik
+        global $CFG;
+        $diagdir = $CFG->dataroot . '/temp/block_mybutton_diag/';
+        @mkdir($diagdir, 0777, true);
+    
+        if (!class_exists('\core_customfield\handler')) {
+            return $options;
+        }
+        $handler = \core_customfield\handler::get_handler('core_course', 'course');
+        if (!$handler) {
+            return $options;
+        }
+    
+        $dcs = $handler->get_instance_data($courseid, true);
+        foreach ($dcs as $dc) {
+            $field = $dc->get_field();
+            if (strtolower((string)$field->get('shortname')) !== 'billing_options') {
+                continue;
+            }
+    
+            // 1) Ambil nilai mentah (bisa HTML)
+            $raw = (string)$dc->get_value();
+    
+            // 2) Normalisasi:
+            //    - ubah </p> dan <br> jadi newline
+            //    - strip_tags
+            //    - normalisasi newline
+            $norm = preg_replace('/<\/p>\s*/i', "\n", $raw);
+            $norm = preg_replace('/<br\s*\/?>/i', "\n", $norm);
+            $norm = strip_tags($norm);
+            $norm = html_entity_decode($norm, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            $norm = str_replace(["\r\n", "\r"], "\n", $norm);
+            $norm = trim($norm);
+    
+            // LOG RAW & NORM
+            @file_put_contents(
+                $diagdir.'billing_source_'.date('Ymd_His').'.log',
+                "RAW:\n$raw\n\nNORM:\n$norm\n\n",
+                FILE_APPEND
+            );
+    
+            if ($norm === '') {
+                break;
+            }
+    
+            // 3) Parse per baris: key|label|price(|days)
+            foreach (explode("\n", $norm) as $line) {
+                $line = trim($line);
+                if ($line === '') { continue; }
+    
+                $parts = array_map('trim', explode('|', $line));
+                if (count($parts) < 3) { continue; }
+    
+                $keyRaw = $parts[0];
+                $label  = $parts[1];
+                $price  = preg_replace('/[^\d]/', '', (string)$parts[2]);
+                $days   = isset($parts[3]) ? (int)$parts[3] : 0;
+    
+                // Sanitisasi key: decode entity, buang tag, lowercase, sisakan a-z0-9_-
+                $key = strtolower($keyRaw);
+                $key = html_entity_decode($key, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                $key = strip_tags($key);
+                $key = preg_replace('/[^a-z0-9_\-]/', '', $key);
+    
+                if ($key !== '' && $label !== '' && $price !== '' && is_numeric($price)) {
+                    $options[$key] = [
+                        'label' => $label,
+                        'price' => (int)$price,
+                        'days'  => $days > 0 ? $days : 0,
+                    ];
+                }
+            }
+    
+            // LOG hasil parse
+            @file_put_contents(
+                $diagdir.'billing_parsed_'.date('Ymd_His').'.log',
+                print_r($options, true) . "\n",
+                FILE_APPEND
+            );
+    
+            break; // selesai setelah ketemu field-nya
+        }
+    
+        return $options;
+    }
+
+
+    public function get_content(): stdClass {
+        global $COURSE, $USER, $DB;
+
+        if ($this->content !== null) {
+            return $this->content;
+        }
+
+        $this->content         = new stdClass();
+        $this->content->text   = '';
+        $this->content->footer = '';
+
+        // URL endpoint server-side yang membuat invoice dan redirect ke Duitku
+        $targeturl = new moodle_url('/local/payment/createinvoice.php', ['courseid' => $COURSE->id]);
+
+        // ---------------------------------------------------------------------
+        // 1) HITUNG SISA ENROLMENT DURATION UNTUK USER SAAT INI
+        // ---------------------------------------------------------------------
+        $remaininglabel = get_string('remaininglabel', 'block_mybutton');
+        $unlimitedtext  = get_string('unlimited', 'block_mybutton');
+        $expiredtext    = get_string('expired', 'block_mybutton');
+        $notenrolled    = get_string('notenrolled', 'block_mybutton');
+
+        $remaininghtml = '';
+        $now = time();
+
+        $instances = enrol_get_instances($COURSE->id, true); // only enabled enrols
+        if (!empty($instances) && isloggedin() && !isguestuser()) {
+            $enrolids = array_map(static function($inst) { return (int)$inst->id; }, $instances);
+            if (!empty($enrolids)) {
+                list($inSql, $inParams) = $DB->get_in_or_equal($enrolids, SQL_PARAMS_NAMED, 'enrolid');
+                $params = array_merge(['userid' => $USER->id], $inParams);
+
+                $userenrols = $DB->get_records_select('user_enrolments', "userid = :userid AND enrolid {$inSql}", $params);
+
+                if ($userenrols) {
+                    $hasUnlimited = false;
+                    $maxTimeEnd   = null;
+
+                    foreach ($userenrols as $ue) {
+                        if ((int)$ue->timeend === 0) {
+                            $hasUnlimited = true;
+                            break;
+                        }
+                        if ($maxTimeEnd === null || (int)$ue->timeend > $maxTimeEnd) {
+                            $maxTimeEnd = (int)$ue->timeend;
+                        }
+                    }
+
+                    if ($hasUnlimited) {
+                        $remaininghtml = html_writer::div(
+                            html_writer::tag('strong', $remaininglabel . ': ') . $unlimitedtext,
+                            'alert alert-success alert-block fade show',
+                            ['style' => 'margin-bottom:10px;']
+                        );
+                    } else if ($maxTimeEnd === null) {
+                        $remaininghtml = html_writer::div(
+                            html_writer::tag('strong', $remaininglabel . ': ') . $notenrolled,
+                            'alert alert-warning alert-block fade show',
+                            ['style' => 'margin-bottom:10px;']
+                        );
+                    } else if ($maxTimeEnd <= $now) {
+                        $remaininghtml = html_writer::div(
+                            html_writer::tag('strong', $remaininglabel . ': ') . $expiredtext,
+                            'alert alert-danger alert-block fade show',
+                            ['style' => 'margin-bottom:10px;']
+                        );
+                    } else {
+                        $remainSeconds = $maxTimeEnd - $now;
+                        $formatted     = $this->format_duration_brief($remainSeconds);
+
+                        $remaininghtml = html_writer::div(
+                            html_writer::tag('strong', $remaininglabel . ': ') . s($formatted),
+                            'alert alert-info alert-block fade show',
+                            ['style' => 'margin-bottom:10px;']
+                        );
+                    }
+                } else {
+                    $remaininghtml = html_writer::div(
+                        html_writer::tag('strong', $remaininglabel . ': ') . $notenrolled,
+                        'alert alert-warning alert-block fade show',
+                        ['style' => 'margin-bottom:10px;']
+                    );
+                }
+            }
+        } else {
+            $remaininghtml = html_writer::div(
+                html_writer::tag('strong', $remaininglabel . ': ') . $notenrolled,
+                'alert alert-warning alert-block fade show',
+                ['style' => 'margin-bottom:10px;']
+            );
+        }
+
+        // ---------------------------------------------------------------------
+        // 2) DROPDOWN PAKET (jika tersedia dari custom field billing_options)
+        // ---------------------------------------------------------------------
+        $plans = $this->get_billing_options($COURSE->id);
+        $selectid = 'mybutton_plan_' . $this->instance->id;
+        $planselecthtml = '';
+
+        if (!empty($plans)) {
+            $optionshtml = [];
+            $optionshtml[] = html_writer::tag('option', 'Pilih paket…', [
+                'value' => '',
+                'selected' => 'selected',
+                'disabled' => 'disabled'
+            ]);
+            foreach ($plans as $key => $meta) {
+                $labelprice = $meta['label'] . ' — Rp ' . number_format($meta['price'], 0, ',', '.');
+                $optionshtml[] = html_writer::tag('option', $labelprice, ['value' => s($key)]);
+            }
+
+            $planselecthtml =
+                html_writer::tag('label', 'Paket', ['for' => $selectid, 'class' => 'form-label']) .
+                html_writer::tag('select', implode('', $optionshtml), [
+                    'id' => $selectid,
+                    'class' => 'form-select mb-2'
+                ]);
+        }
+
+        // ---------------------------------------------------------------------
+        // 3) TOMBOL + ALERT (NOTIFIKASI) SAAT DIKLIK
+        // ---------------------------------------------------------------------
+        $buttonid = 'mybutton_btn_' . $this->instance->id;
+        $noticeid = 'mybutton_notice_' . $this->instance->id;
+
+        $buttonhtml = html_writer::tag('button',
+            get_string('buttonlabel', 'block_mybutton'),
+            [
+                'class' => 'btn btn-primary',
+                'id'    => $buttonid,
+                'type'  => 'button',
+                'aria-label' => get_string('buttondesc', 'block_mybutton'),
+            ]
+        );
+
+        $notice = html_writer::div(
+            html_writer::tag('strong', get_string('notice_heading', 'block_mybutton')) . ' ' .
+            html_writer::span(get_string('notice_text', 'block_mybutton')),
+            'alert alert-info alert-block fade show',
+            [
+                'id'    => $noticeid,
+                'style' => 'display:none;margin-top:10px;',
+                'role'  => 'status',
+            ]
+        );
+
+        // JS: tampilkan alert lalu redirect, menyertakan plan jika dipilih
+        $js = "
+            <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                var btn = document.getElementById('$buttonid');
+                var notice = document.getElementById('$noticeid');
+                var sel = document.getElementById('$selectid');
+                if (btn && notice) {
+                    btn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        var url = " . json_encode($targeturl->out(false)) . ";
+                        if (sel) {
+                            var plan = sel.value;
+                            if (!plan) {
+                                alert('Silakan pilih paket terlebih dahulu.');
+                                return;
+                            }
+                            url += (url.indexOf('?') === -1 ? '?' : '&') + 'plan=' + encodeURIComponent(plan);
+                        }
+                        notice.style.display = 'block';
+                        try { notice.scrollIntoView({behavior:'smooth', block:'nearest'}); } catch (e) {}
+                        setTimeout(function() {
+                            window.location.href = url;
+                        }, 500);
+                    });
+                }
+            });
+            </script>
+        ";
+
+        // Susun konten block: sisa durasi → dropdown paket (jika ada) → tombol → alert → js
+        $this->content->text =
+            $remaininghtml .
+            $planselecthtml .
+            html_writer::div($buttonhtml, 'mb-2') .
+            $notice .
+            $js;
+
+        return $this->content;
+    }
+}

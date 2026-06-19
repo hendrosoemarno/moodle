@@ -1,0 +1,16 @@
+<?php
+// File: local/payment/return.php
+require('../../config.php');
+
+$PAGE->set_context(context_system::instance());
+$PAGE->set_pagelayout('standard');
+$PAGE->set_title("Payment Result");
+
+echo $OUTPUT->header();
+
+echo html_writer::div(
+    "<h3>Terima kasih</h3><p>Status pembayaran akan diverifikasi. Silakan cek kembali course Anda sebentar lagi.</p>",
+    'alert alert-info'
+);
+
+echo $OUTPUT->footer();

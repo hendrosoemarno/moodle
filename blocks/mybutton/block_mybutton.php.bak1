@@ -1,0 +1,66 @@
+<?php
+defined('MOODLE_INTERNAL') || die();
+
+//////pop up button/////////////
+
+class block_mybutton extends block_base {
+
+    public function init(): void {
+        $this->title = get_string('pluginname', 'block_mybutton');
+    }
+
+    public function applicable_formats(): array {
+        return [
+            'course-view' => true,
+            'site-index'  => false,
+            'mod'         => false,
+            'my'          => false,
+        ];
+    }
+
+    public function instance_allow_multiple(): bool {
+        return false;
+    }
+
+    public function get_content(): stdClass {
+        global $COURSE, $OUTPUT;
+
+        if ($this->content !== null) {
+            return $this->content;
+        }
+
+        $this->content         = new stdClass();
+        $this->content->text   = '';
+        $this->content->footer = '';
+
+        $targeturl = new moodle_url('/local/payment/checkout.php', ['id' => $COURSE->id]);
+
+        // Tombol dengan id unik
+        $buttonid   = 'mybutton_' . $this->instance->id;
+        $buttonhtml = html_writer::tag('button',
+            get_string('buttonlabel', 'block_mybutton'),
+            ['class' => 'btn btn-primary', 'id' => $buttonid, 'type' => 'button']
+        );
+
+        // Tambahkan script JS sederhana
+        $js = "
+            <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                var btn = document.getElementById('$buttonid');
+                if (btn) {
+                    btn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        if (confirm('Apakah Anda yakin ingin melanjutkan ke pembayaran?')) {
+                            window.location.href = '$targeturl';
+                        }
+                    });
+                }
+            });
+            </script>
+        ";
+
+        $this->content->text = $buttonhtml . $js;
+
+        return $this->content;
+    }
+}

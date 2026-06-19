@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<XMLDB PATH="mod/studentreport/db" VERSION="2025070300" COMMENT="XMLDB for mod_studentreport">
+    <TABLES>
+        <TABLE NAME="studentreport" COMMENT="Tabel utama plugin mod_studentreport">
+            <FIELDS>
+                <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
+                <FIELD NAME="name" TYPE="char" LENGTH="100" NOTNULL="true"/>
+                <FIELD NAME="intro" TYPE="text" NOTNULL="false"/>
+                <FIELD NAME="introformat" TYPE="int" LENGTH="2" NOTNULL="true" DEFAULT="0"/>
+                <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true"/>
+                <FIELD NAME="legend" TYPE="text" NOTNULL="false"/>
+                <FIELD NAME="legendformat" TYPE="int" LENGTH="2" NOTNULL="true" DEFAULT="1"/>
+                <FIELD NAME="kompetensi" TYPE="text" NOTNULL="false"/>
+                <FIELD NAME="kompetensiformat" TYPE="int" LENGTH="2" NOTNULL="true" DEFAULT="1"/>
+
+            </FIELDS>
+            <KEYS>
+                <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+            </KEYS>
+        </TABLE>
+    </TABLES>
+</XMLDB>

@@ -1,0 +1,26 @@
+<?php
+// File: local/payment/callback.php
+require('../../config.php');
+
+// Amankan: callback ini tidak perlu login user, jadi langsung terima POST dari Duitku
+// Set header supaya gateway tahu ini JSON
+header('Content-Type: application/json');
+
+// Ambil raw body (JSON/POST dari Duitku)
+$raw = file_get_contents("php://input");
+
+// Buat folder temp log (kalau belum ada)
+$logdir = $CFG->dataroot . '/temp/duitku_callback/';
+if (!file_exists($logdir)) {
+    mkdir($logdir, 0777, true);
+}
+
+// Simpan dengan timestamp
+$filename = $logdir . 'callback_' . date('Ymd_His') . '.log';
+file_put_contents($filename, "=== Callback at ".date('c')." ===\n".$raw."\n\n", FILE_APPEND);
+
+// Kalau ingin juga simpan $_POST terparse
+file_put_contents($filename, "Parsed POST:\n".print_r($_POST, true)."\n\n", FILE_APPEND);
+
+// Balas ke Duitku (WAJIB 200 OK + string “SUCCESS” supaya callback dianggap berhasil)
+echo json_encode(['status' => 'SUCCESS']);

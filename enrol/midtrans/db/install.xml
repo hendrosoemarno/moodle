@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PLUGIN name="enrol_midtrans" type="enrol" path="/enrol/midtrans">
+    <VERSION>
+        <NUMBER>2026061200</NUMBER>
+        <RELEASE>1.0 (Build: 2026061200)</RELEASE>
+    </VERSION>
+    <FILES>
+        <!-- Tidak perlu definisi file tambahan jika hanya menggunakan access.php -->
+    </FILES>
+    <CAPABILITIES>
+        <CAPABILITY name="enrol/midtrans:config" component="enrol_midtrans">
+            <RISKBITMASK value="0"/>
+            <CONTEXTLEVEL value="50"/> <!-- CONTEXT_COURSE -->
+        </CAPABILITY>
+        <CAPABILITY name="enrol/midtrans:manage" component="enrol_midtrans">
+            <RISKBITMASK value="0"/>
+            <CONTEXTLEVEL value="50"/> <!-- CONTEXT_COURSE -->
+        </CAPABILITY>
+        <CAPABILITY name="enrol/midtrans:unenrol" component="enrol_midtrans">
+            <RISKBITMASK value="0"/>
+            <CONTEXTLEVEL value="50"/> <!-- CONTEXT_COURSE -->
+        </CAPABILITY>
+        <CAPABILITY name="enrol/midtrans:unenrolself" component="enrol_midtrans">
+            <RISKBITMASK value="0"/>
+            <CONTEXTLEVEL value="50"/> <!-- CONTEXT_COURSE -->
+        </CAPABILITY>
+    </CAPABILITIES>
+</PLUGIN>

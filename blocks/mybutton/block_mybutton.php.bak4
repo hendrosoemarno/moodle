@@ -1,0 +1,214 @@
+<?php
+defined('MOODLE_INTERNAL') || die();
+
+    /**
+     * sudah benar tahap bisa kirim invoice ke duitku
+     */
+
+class block_mybutton extends block_base {
+
+    public function init(): void {
+        $this->title = get_string('pluginname', 'block_mybutton');
+    }
+
+    // Tampilkan di halaman course saja (ubah sesuai kebutuhan).
+    public function applicable_formats(): array {
+        return [
+            'course-view' => true,
+            'site-index'  => false,
+            'mod'         => false,
+            'my'          => false,
+        ];
+    }
+
+    public function instance_allow_multiple(): bool {
+        return false;
+    }
+
+    /**
+     * Format detik menjadi string ringkas: "X hari Y jam Z menit"
+     */
+    private function format_duration_brief(int $seconds): string {
+        if ($seconds <= 0) {
+            return '0 menit';
+        }
+        $minutes = intdiv($seconds, 60);
+        $seconds = $seconds % 60;
+
+        $hours   = intdiv($minutes, 60);
+        $minutes = $minutes % 60;
+
+        $days    = intdiv($hours, 24);
+        $hours   = $hours % 24;
+
+        $parts = [];
+        if ($days > 0)   { $parts[] = $days . ' hari'; }
+        if ($hours > 0)  { $parts[] = $hours . ' jam'; }
+        if ($minutes > 0 || empty($parts)) { $parts[] = $minutes . ' menit'; }
+
+        return implode(' ', $parts);
+    }
+
+    public function get_content(): stdClass {
+        global $COURSE, $USER, $DB;
+
+        if ($this->content !== null) {
+            return $this->content;
+        }
+
+        $this->content         = new stdClass();
+        $this->content->text   = '';
+        $this->content->footer = '';
+
+        // === GANTI ke URL target Anda (mis. endpoint local payment/duitku) ===
+        // $targeturl = new moodle_url('/local/payment/checkout.php', ['id' => $COURSE->id]);
+        // $targeturl = new moodle_url('/local/payment/checkout.php', ['courseid' => $COURSE->id]);
+        $targeturl = new moodle_url('/local/payment/createinvoice.php', ['courseid' => $COURSE->id]);
+
+
+
+        // ---------------------------------------------------------------------
+        // 1) HITUNG SISA ENROLMENT DURATION UNTUK USER SAAT INI
+        // ---------------------------------------------------------------------
+        $remaininglabel = get_string('remaininglabel', 'block_mybutton');
+        $unlimitedtext  = get_string('unlimited', 'block_mybutton');
+        $expiredtext    = get_string('expired', 'block_mybutton');
+        $notenrolled    = get_string('notenrolled', 'block_mybutton');
+
+        $remaininghtml = '';
+        $now = time();
+
+        // Ambil semua enrol instance di course ini.
+        $instances = enrol_get_instances($COURSE->id, true); // true => only enabled
+        if (!empty($instances) && isloggedin() && !isguestuser()) {
+            // Ambil semua enrolid dari course ini
+            $enrolids = array_map(static function($inst) { return (int)$inst->id; }, $instances);
+
+            // Query user_enrolments untuk user saat ini pada enrolid tersebut
+            list($inSql, $inParams) = $DB->get_in_or_equal($enrolids, SQL_PARAMS_NAMED, 'enrolid');
+            $params = array_merge(['userid' => $USER->id], $inParams);
+
+            $userenrols = $DB->get_records_select('user_enrolments', "userid = :userid AND enrolid {$inSql}", $params);
+
+            if ($userenrols) {
+                $hasUnlimited = false;
+                $maxTimeEnd   = null;
+
+                foreach ($userenrols as $ue) {
+                    // timeend = 0 berarti tanpa batas waktu
+                    if ((int)$ue->timeend === 0) {
+                        $hasUnlimited = true;
+                        break;
+                    }
+                    // Simpan timeend terbesar
+                    if ($maxTimeEnd === null || (int)$ue->timeend > $maxTimeEnd) {
+                        $maxTimeEnd = (int)$ue->timeend;
+                    }
+                }
+
+                if ($hasUnlimited) {
+                    $remaininghtml = html_writer::div(
+                        html_writer::tag('strong', $remaininglabel . ': ') . $unlimitedtext,
+                        'alert alert-success alert-block fade show',
+                        ['style' => 'margin-bottom:10px;']
+                    );
+                } else if ($maxTimeEnd === null) {
+                    // Tidak ada timeend valid (harusnya tak terjadi jika ada enrols), anggap tidak terdaftar
+                    $remaininghtml = html_writer::div(
+                        html_writer::tag('strong', $remaininglabel . ': ') . $notenrolled,
+                        'alert alert-warning alert-block fade show',
+                        ['style' => 'margin-bottom:10px;']
+                    );
+                } else if ($maxTimeEnd <= $now) {
+                    // Sudah berakhir
+                    $remaininghtml = html_writer::div(
+                        html_writer::tag('strong', $remaininglabel . ': ') . $expiredtext,
+                        'alert alert-danger alert-block fade show',
+                        ['style' => 'margin-bottom:10px;']
+                    );
+                } else {
+                    // Masih ada sisa
+                    $remainSeconds = $maxTimeEnd - $now;
+                    $formatted     = $this->format_duration_brief($remainSeconds);
+
+                    $remaininghtml = html_writer::div(
+                        html_writer::tag('strong', $remaininglabel . ': ') . s($formatted),
+                        'alert alert-info alert-block fade show',
+                        ['style' => 'margin-bottom:10px;']
+                    );
+                }
+            } else {
+                // User tidak punya enrol di course ini
+                $remaininghtml = html_writer::div(
+                    html_writer::tag('strong', $remaininglabel . ': ') . $notenrolled,
+                    'alert alert-warning alert-block fade show',
+                    ['style' => 'margin-bottom:10px;']
+                );
+            }
+        } else {
+            // Tidak login / guest / tidak ada enrol instance
+            $remaininghtml = html_writer::div(
+                html_writer::tag('strong', $remaininglabel . ': ') . $notenrolled,
+                'alert alert-warning alert-block fade show',
+                ['style' => 'margin-bottom:10px;']
+            );
+        }
+
+        // ---------------------------------------------------------------------
+        // 2) TOMBOL + ALERT (NOTIFIKASI) SAAT DIKLIK
+        // ---------------------------------------------------------------------
+        $buttonid = 'mybutton_btn_' . $this->instance->id;
+        $noticeid = 'mybutton_notice_' . $this->instance->id;
+
+        // Tombol (Bootstrap Moodle)
+        $buttonhtml = html_writer::tag('button',
+            get_string('buttonlabel', 'block_mybutton'),
+            [
+                'class' => 'btn btn-primary',
+                'id'    => $buttonid,
+                'type'  => 'button',
+                'aria-label' => get_string('buttondesc', 'block_mybutton'),
+            ]
+        );
+
+        // Alert gaya Moodle (mirip “All caches were purged”) - hidden awalnya
+        $notice = html_writer::div(
+            html_writer::tag('strong', get_string('notice_heading', 'block_mybutton')) . ' ' .
+            html_writer::span(get_string('notice_text', 'block_mybutton')),
+            'alert alert-info alert-block fade show',
+            [
+                'id'    => $noticeid,
+                'style' => 'display:none;margin-top:10px;',
+                'role'  => 'status',
+            ]
+        );
+
+        // JS: tampilkan alert lalu redirect setelah 2 detik
+        $js = "
+            <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                var btn = document.getElementById('$buttonid');
+                var notice = document.getElementById('$noticeid');
+                if (btn && notice) {
+                    btn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        notice.style.display = 'block';
+                        try { notice.scrollIntoView({behavior:'smooth', block:'nearest'}); } catch (e) {}
+                        setTimeout(function() {
+                            window.location.href = " . json_encode($targeturl->out(false)) . ";
+                        }, 2000);
+                    });
+                }
+            });
+            </script>
+        ";
+
+        // Susun konten block:
+        //  - Notifikasi sisa durasi
+        //  - Tombol
+        //  - Alert proses redirect
+        $this->content->text = $remaininghtml . html_writer::div($buttonhtml, 'mb-2') . $notice . $js;
+
+        return $this->content;
+    }
+}

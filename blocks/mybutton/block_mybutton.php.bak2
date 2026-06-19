@@ -1,0 +1,95 @@
+<?php
+defined('MOODLE_INTERNAL') || die();
+
+//////////////button - alert - link
+class block_mybutton extends block_base {
+
+    public function init(): void {
+        $this->title = get_string('pluginname', 'block_mybutton');
+    }
+
+    // Tampilkan di halaman course saja (ubah sesuai kebutuhan).
+    public function applicable_formats(): array {
+        return [
+            'course-view' => true,
+            'site-index'  => false,
+            'mod'         => false,
+            'my'          => false,
+        ];
+    }
+
+    public function instance_allow_multiple(): bool {
+        return false;
+    }
+
+    public function get_content(): stdClass {
+        global $COURSE;
+
+        if ($this->content !== null) {
+            return $this->content;
+        }
+
+        $this->content         = new stdClass();
+        $this->content->text   = '';
+        $this->content->footer = '';
+
+        // === GANTI ke URL target Anda (mis. endpoint local payment/duitku) ===
+        $targeturl = new moodle_url('/local/payment/checkout.php', ['id' => $COURSE->id]);
+
+        // Elemen HTML
+        $buttonid = 'mybutton_btn_' . $this->instance->id;
+        $noticeid = 'mybutton_notice_' . $this->instance->id;
+
+        // Tombol (Bootstrap Moodle)
+        $buttonhtml = html_writer::tag('button',
+            get_string('buttonlabel', 'block_mybutton'),
+            [
+                'class' => 'btn btn-primary',
+                'id'    => $buttonid,
+                'type'  => 'button',
+                'aria-label' => get_string('buttondesc', 'block_mybutton'),
+            ]
+        );
+
+        // Alert gaya Moodle (mirip “All caches were purged”)
+        // Disembunyikan awalnya, tampil saat klik.
+        $notice = html_writer::div(
+            html_writer::tag('strong', get_string('notice_heading', 'block_mybutton')) . ' ' .
+            html_writer::span(get_string('notice_text', 'block_mybutton')),
+            // Class berikut bekerja baik pada Moodle 4.x (Bootstrap alert)
+            'alert alert-info alert-block fade show',
+            [
+                'id'    => $noticeid,
+                'style' => 'display:none;margin-top:10px;',
+                'role'  => 'status',
+            ]
+        );
+
+        // JS: tampilkan alert, lalu redirect setelah 2 detik.
+        $js = "
+            <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                var btn = document.getElementById('$buttonid');
+                var notice = document.getElementById('$noticeid');
+                if (btn && notice) {
+                    btn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        // Tampilkan alert biru ala Moodle.
+                        notice.style.display = 'block';
+                        // Opsional: scroll ke alert agar terlihat jelas.
+                        try { notice.scrollIntoView({behavior:'smooth', block:'nearest'}); } catch (e) {}
+
+                        // Redirect otomatis setelah 2 detik.
+                        setTimeout(function() {
+                            window.location.href = " . json_encode($targeturl->out(false)) . ";
+                        }, 2000);
+                    });
+                }
+            });
+            </script>
+        ";
+
+        $this->content->text = html_writer::div($buttonhtml, 'mb-2') . $notice . $js;
+        return $this->content;
+    }
+}

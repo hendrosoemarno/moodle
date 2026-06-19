@@ -1,0 +1,221 @@
+<?php
+
+    /**
+     * sudah benar tahap bisa kirim invoice ke duitku
+     */
+
+
+// File: /local/payment/createinvoice.php
+require('../../config.php');
+require_once($CFG->dirroot . '/user/profile/lib.php'); // untuk baca profil kustom jika perlu
+
+$courseid = required_param('courseid', PARAM_INT);
+
+// Setup halaman (tak benar-benar ditampilkan karena akan redirect)
+$PAGE->set_context(context_system::instance());
+$PAGE->set_url(new moodle_url('/local/payment/createinvoice.php', ['courseid' => $courseid]));
+$PAGE->set_pagelayout('standard');
+
+// Wajib login & akses course
+if (!isloggedin() || isguestuser()) {
+    \core\notification::warning(get_string('notloggedin', 'local_payment'));
+    redirect(new moodle_url('/login/index.php'));
+}
+require_login($courseid);
+
+// Ambil course
+$course = get_course($courseid);
+if (!$course) {
+    \core\notification::error(get_string('missingcourse', 'local_payment'));
+    redirect(new moodle_url('/'));
+    exit;
+}
+
+// === Kredensial dari settings plugin ===
+$merchantCode = (string)(get_config('local_payment', 'merchantcode') ?? '');
+$merchantKey  = (string)(get_config('local_payment', 'merchantkey') ?? '');
+$isSandbox    = (bool)(get_config('local_payment', 'sandbox') ?? true);
+
+if ($merchantCode === '' || $merchantKey === '') {
+    \core\notification::error('Merchant Code atau Merchant Key belum diisi di Site administration → Plugins → Local plugins → Pembayaran (Gateway).');
+    redirect(new moodle_url('/course/view.php', ['id' => $courseid]));
+    exit;
+}
+
+// === Harga: ambil dari custom field shortname 'price' jika ada, fallback 125000 ===
+$paymentAmount = 100000;
+try {
+    if (class_exists('\core_customfield\handler')) {
+        $handler = \core_customfield\handler::get_handler('core_course', 'course');
+        if ($handler) {
+            $datacontrollers = $handler->get_instance_data($course->id, true);
+            if (!empty($datacontrollers)) {
+                foreach ($datacontrollers as $dc) {
+                    $field = $dc->get_field();
+                    $shortname = strtolower((string)$field->get('shortname'));
+                    if ($shortname === 'price') {
+                        $raw = $dc->get_value();
+                        if (is_string($raw)) {
+                            // hilangkan karakter non-digit, mis: "Rp 125.000" -> "125000"
+                            $raw = preg_replace('/[^\d]/', '', $raw);
+                        }
+                        if ($raw !== null && $raw !== '' && is_numeric($raw)) {
+                            $paymentAmount = (int)$raw;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+} catch (Throwable $e) {
+    // diamkan, gunakan fallback
+}
+
+// === Data pelanggan dari profil Moodle ===
+$email = (string)$USER->email;
+
+// === Nomor telepon dari custom profile field (Parent WA Number) ===
+$phoneNumber = '';
+
+// Ambil semua custom field user ini
+$extrafields = profile_user_record($USER->id, false);
+
+// Cek apakah ada field dengan shortname 'parentwanumber'
+if (!empty($extrafields) && !empty($extrafields->parent_wa)) {
+    $phoneNumber = trim($extrafields->parent_wa);
+}
+
+// Kalau masih kosong, fallback ke phone1/phone2
+if ($phoneNumber === '') {
+    if (!empty($USER->phone1)) {
+        $phoneNumber = $USER->phone1;
+    } else if (!empty($USER->phone2)) {
+        $phoneNumber = $USER->phone2;
+    }
+}
+
+// Kalau tetap kosong, set dummy untuk testing (tidak disarankan di produksi)
+if ($phoneNumber === '') {
+    \core\notification::warning(get_string('phonehint', 'local_payment'));
+    $phoneNumber = '08123456789';
+}
+
+$firstname = trim($USER->firstname ?? '');
+$lastname  = trim($USER->lastname ?? '');
+
+// === Detail produk & orderId unik ===
+$productDetail   = format_string($course->fullname);
+$merchantOrderId = 'ORD-' . date('YmdHis') . '-' . mt_rand(1000, 9999);
+
+// === URL callback & return (silakan siapkan file-nya) ===
+$callbackUrl = (new moodle_url('/local/payment/callback.php'))->out(false);
+$returnUrl   = (new moodle_url('/local/payment/return.php', ['courseid' => $courseid]))->out(false);
+
+// === Load library Duitku non-composer ===
+require_once($CFG->dirroot . '/local/payment/thirdparty/duitku/Duitku.php');
+
+// === Konfigurasi Duitku ===
+$duitkuConfig = new \Duitku\Config($merchantKey, $merchantCode);
+$duitkuConfig->setSandboxMode($isSandbox);
+$duitkuConfig->setSanitizedMode(true); // field kosong akan dibuang
+$duitkuConfig->setDuitkuLogs(true);    // aktifkan log di server (sesuai lib Duitku)
+
+// === Bangun customerDetail agar tab "PELANGGAN" terisi di halaman redirect ===
+$customerDetail = array_filter([
+    'firstName'   => $firstname ?: null,
+    'lastName'    => $lastname ?: null,
+    'email'       => $email ?: null,
+    'phoneNumber' => $phoneNumber ?: null,
+]);
+// (opsional) alamat tagihan/pengiriman (isi jika Anda punya datanya)
+// $billing = array_filter([
+//     'firstName'  => $firstname ?: null,
+//     'lastName'   => $lastname  ?: null,
+//     'address'    => $USER->address ?? null,
+//     'city'       => null,
+//     'postalCode' => null,
+//     'countryCode'=> 'ID'
+// ]);
+// $shipping = $billing;
+// if (!empty($billing))  { $customerDetail['billingAddress']  = $billing; }
+// if (!empty($shipping)) { $customerDetail['shippingAddress'] = $shipping; }
+
+// === Susun parameter POP ===
+$params = [
+    'paymentAmount'   => (int)$paymentAmount,
+    'merchantOrderId' => $merchantOrderId,
+    'productDetails'  => (string)$productDetail,
+
+    // top-level masih boleh dikirim (tidak wajib), tapi UI pelanggan baca dari customerDetail
+    'email'           => (string)$email,
+    'phoneNumber'     => (string)$phoneNumber,
+    'customerVaName'  => fullname($USER),
+
+    'itemDetails'     => [[
+        'name'     => (string)$productDetail,
+        'price'    => (int)$paymentAmount,
+        'quantity' => 1
+    ]],
+    'callbackUrl'     => $callbackUrl,
+    'returnUrl'       => $returnUrl,
+    'expiryPeriod'    => 60
+];
+if (!empty($customerDetail)) {
+    $params['customerDetail'] = $customerDetail;
+}
+
+// === LOGGING: simpan payload yang akan dikirim ===
+$reqdir = $CFG->dataroot . '/temp/duitku_request/';
+if (!file_exists($reqdir)) {
+    @mkdir($reqdir, 0777, true);
+}
+$reqfile = $reqdir . 'request_' . date('Ymd_His') . '.log';
+$reqblob  = "=== Request at ".date('c')." ===\n";
+$reqblob .= "User ID: {$USER->id}\n";
+$reqblob .= "Course ID: {$courseid}\n";
+$reqblob .= "MerchantCode: {$merchantCode}\n";
+$reqblob .= "Sandbox: " . ($isSandbox ? 'true' : 'false') . "\n";
+$reqblob .= "Payload:\n" . print_r($params, true) . "\n\n";
+@file_put_contents($reqfile, $reqblob, FILE_APPEND);
+
+// === Panggil API POP & tangani respons ===
+try {
+    $responseJson = \Duitku\Pop::createInvoice($params, $duitkuConfig);
+} catch (Exception $e) {
+    \core\notification::error(get_string('posterror', 'local_payment') . ' ' . s($e->getMessage()));
+    redirect(new moodle_url('/course/view.php', ['id' => $courseid]));
+    exit;
+}
+
+// === LOGGING: simpan respons mentah ===
+$resdir = $CFG->dataroot . '/temp/duitku_response/';
+if (!file_exists($resdir)) {
+    @mkdir($resdir, 0777, true);
+}
+$resfile = $resdir . 'response_' . date('Ymd_His') . '.log';
+$resblob  = "=== Response at ".date('c')." ===\n";
+$resblob .= $responseJson . "\n\n";
+@file_put_contents($resfile, $resblob, FILE_APPEND);
+
+// Parse JSON
+$data = json_decode($responseJson, true);
+if (!is_array($data)) {
+    \core\notification::error(get_string('badresponse', 'local_payment'));
+    redirect(new moodle_url('/course/view.php', ['id' => $courseid]));
+    exit;
+}
+
+// Ambil paymentUrl
+$paymenturl = $data['paymentUrl'] ?? null;
+if (empty($data['reference']) || empty($paymenturl)) {
+    $snippet = s(mb_substr($responseJson, 0, 300));
+    \core\notification::error(get_string('nopaymenturl', 'local_payment') . ' ' . $snippet);
+    redirect(new moodle_url('/course/view.php', ['id' => $courseid]));
+    exit;
+}
+
+// (Opsional) simpan log transaksi awal ke tabel kustom Anda di sini
+
+// Redirect user langsung ke halaman pembayaran Duitku
+redirect(new moodle_url($paymenturl));

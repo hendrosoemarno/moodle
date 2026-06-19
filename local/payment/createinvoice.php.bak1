@@ -1,0 +1,172 @@
+<?php
+// File: /local/payment/createinvoice.php
+require('../../config.php');
+require_once($CFG->dirroot . '/user/profile/lib.php');
+
+$courseid = required_param('courseid', PARAM_INT);
+
+// Setup halaman
+$PAGE->set_context(context_system::instance());
+$PAGE->set_url(new moodle_url('/local/payment/createinvoice.php', ['courseid' => $courseid]));
+$PAGE->set_pagelayout('standard');
+
+// Wajib login & akses ke course
+if (!isloggedin() || isguestuser()) {
+    \core\notification::warning(get_string('notloggedin', 'local_payment'));
+    redirect(new moodle_url('/login/index.php'));
+}
+require_login($courseid);
+
+// Ambil course
+$course = get_course($courseid);
+if (!$course) {
+    \core\notification::error(get_string('missingcourse', 'local_payment'));
+    redirect(new moodle_url('/'));
+    exit;
+}
+
+// === Ambil data dari pengaturan plugin ===
+$merchantCode = get_config('local_payment', 'merchantcode') ?: '';
+$merchantKey  = get_config('local_payment', 'merchantkey') ?: '';
+$isSandbox    = (bool) get_config('local_payment', 'sandbox');
+
+// Validasi kredensial
+if ($merchantCode === '' || $merchantKey === '') {
+    \core\notification::error('Merchant Code atau Merchant Key belum diisi di Site administration → Plugins → Local plugins → Pembayaran (Gateway).');
+    redirect(new moodle_url('/course/view.php', ['id' => $courseid]));
+    exit;
+}
+
+// === Siapkan data invoice ===
+// Default fallback
+$paymentAmount = 125000;
+
+try {
+    if (class_exists('\core_customfield\handler')) {
+        $handler = \core_customfield\handler::get_handler('core_course', 'course');
+        if ($handler) {
+            // Ambil semua data custom field utk course ini
+            $datacontrollers = $handler->get_instance_data($course->id, true);
+
+            if (!empty($datacontrollers)) {
+                foreach ($datacontrollers as $dc) {
+                    // $dc = \core_customfield\data_controller
+                    $field = $dc->get_field(); // \core_customfield\field_controller
+                    $shortname = strtolower((string)$field->get('shortname')); // aman: normalisasi huruf
+                    if ($shortname === 'price') {
+                        $raw = $dc->get_value(); // bisa string/number tergantung tipe field
+                        // Bersihkan ke angka (kalau user isi "125.000" atau "Rp 125,000")
+                        if (is_string($raw)) {
+                            $raw = preg_replace('/[^\d]/', '', $raw);
+                        }
+                        if ($raw !== null && $raw !== '' && is_numeric($raw)) {
+                            $paymentAmount = (int)$raw;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+} catch (Throwable $e) {
+    // Abaikan, pakai fallback
+    // Optional: tulis log bila perlu
+    // debugging('Custom field price read error: '.$e->getMessage());
+}
+
+$productDetail = format_string($course->fullname);
+$email         = (string) $USER->email;
+
+// Nomor telepon dari profil
+$phoneNumber = '';
+if (!empty($USER->phone1)) {
+    $phoneNumber = $USER->phone1;
+} else if (!empty($USER->phone2)) {
+    $phoneNumber = $USER->phone2;
+} else {
+    $uprofile = profile_user_record($USER->id, false);
+    if (!empty($uprofile->phone)) {
+        $phoneNumber = $uprofile->phone;
+    }
+}
+if ($phoneNumber === '') {
+    \core\notification::warning(get_string('phonehint', 'local_payment'));
+    $phoneNumber = '08123456789'; // hanya fallback uji
+}
+
+// === Load library Duitku non-composer ===
+require_once($CFG->dirroot . '/local/payment/thirdparty/duitku/Duitku.php');
+
+try {
+    // 1) Buat config Duitku
+    $duitkuConfig = new \Duitku\Config($merchantKey, $merchantCode);
+    $duitkuConfig->setSandboxMode($isSandbox);
+    $duitkuConfig->setSanitizedMode(true);
+    $duitkuConfig->setDuitkuLogs(true);
+
+    // 2) Buat merchantOrderId unik
+    $merchantOrderId = 'ORD-' . date('YmdHis') . '-' . mt_rand(1000, 9999);
+
+    // 3) Susun parameter POP
+    $params = [
+        'paymentAmount'   => (int)$paymentAmount,
+        'merchantOrderId' => $merchantOrderId,
+        'productDetails'  => (string)$productDetail,
+        'email'           => (string)$email,
+        'phoneNumber'     => (string)$phoneNumber,
+        'customerVaName'  => fullname($USER),
+        'itemDetails'     => [
+            [
+                'name'     => (string)$productDetail,
+                'price'    => (int)$paymentAmount,
+                'quantity' => 1
+            ]
+        ],
+        // TODO: ganti dengan URL publik Anda untuk callback & return
+        'callbackUrl'     => (new moodle_url('/local/payment/callback.php'))->out(false),
+        'returnUrl'       => (new moodle_url('/local/payment/return.php', ['courseid' => $courseid]))->out(false),
+        'expiryPeriod'    => 60
+    ];
+
+    // === LOG data sebelum dikirim ===
+    $logdir = $CFG->dataroot . '/temp/duitku_request/';
+    if (!file_exists($logdir)) {
+        mkdir($logdir, 0777, true);
+    }
+    $filename = $logdir . 'request_' . date('Ymd_His') . '.log';
+    $logdata  = "=== Request at ".date('c')." ===\n";
+    $logdata .= "User ID: {$USER->id}\n";
+    $logdata .= "Course ID: {$courseid}\n";
+    $logdata .= "MerchantCode: $merchantCode\n";
+    $logdata .= "MerchantKey: [HIDDEN]\n";
+    $logdata .= "Payload:\n".print_r($params, true)."\n\n";
+    file_put_contents($filename, $logdata, FILE_APPEND);
+
+    // 4) Panggil API POP via library
+    $responseJson = \Duitku\Pop::createInvoice($params, $duitkuConfig);
+    $data = json_decode($responseJson, true);
+
+    // 5) Validasi
+    if (!is_array($data)) {
+        \core\notification::error(get_string('badresponse', 'local_payment'));
+        redirect(new moodle_url('/course/view.php', ['id' => $courseid]));
+        exit;
+    }
+    if (empty($data['reference']) || empty($data['paymentUrl'])) {
+        // Tampilkan sedikit respon untuk debug
+        $snippet = s(mb_substr($responseJson, 0, 300));
+        \core\notification::error(get_string('nopaymenturl', 'local_payment') . ' ' . $snippet);
+        redirect(new moodle_url('/course/view.php', ['id' => $courseid]));
+        exit;
+    }
+
+    // 6) (Opsional) Simpan log transaksi awal ke tabel kustom Anda di sini
+
+    // 7) Langsung redirect ke Duitku
+    redirect(new moodle_url($data['paymentUrl'])); // 303 ke halaman pembayaran
+
+} catch (Exception $e) {
+    \core\notification::error(get_string('posterror', 'local_payment') . ' ' . s($e->getMessage()));
+    redirect(new moodle_url('/course/view.php', ['id' => $courseid]));
+    exit;
+}

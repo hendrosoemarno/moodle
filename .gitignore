@@ -1,0 +1,6 @@
+config.php
+error_log
+.htaccess
+.grunt/
+*.zip
+*.log
