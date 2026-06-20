@@ -41,9 +41,8 @@ if (empty($deepquizzes)) {
     exit;
 }
 
-$results = [];
+$quizdata = [];
 $highestattempted = 0;
-$highesttopic = '';
 foreach ($deepquizzes as $qz) {
     $best = $DB->get_record_sql('
         SELECT MAX(sumgrades) AS bestgrade
@@ -51,31 +50,46 @@ foreach ($deepquizzes as $qz) {
         WHERE quiz = :quizid AND userid = :userid AND state = :state
     ', ['quizid' => $qz['id'], 'userid' => $currentuserid, 'state' => 'finished']);
 
-    $percentage = 0;
     $hasattempt = $best && $best->bestgrade !== null;
-
+    $percentage = 0;
     if ($hasattempt) {
         $percentage = ($qz['maxgrade'] > 0) ? ($best->bestgrade / $qz['maxgrade']) * 100 : 0;
         if ($qz['number'] > $highestattempted) {
             $highestattempted = $qz['number'];
-            $highesttopic = $qz['topic'];
         }
     }
 
-    if (!$hasattempt) {
-        $statustext = get_string('status_belum_kompeten', 'deepdiagnostic');
-    } elseif ($percentage <= 0) {
-        $statustext = get_string('status_belum_kompeten', 'deepdiagnostic');
-    } elseif ($percentage < 50) {
-        $statustext = get_string('status_sebagian', 'deepdiagnostic');
+    $quizdata[] = [
+        'number'      => $qz['number'],
+        'topic'       => $qz['topic'],
+        'hasattempt'  => $hasattempt,
+        'percentage'  => $percentage,
+    ];
+}
+
+$results = [];
+$highesttopic = '';
+foreach ($quizdata as $qd) {
+    if (!$qd['hasattempt']) {
+        continue;
+    }
+
+    if ($qd['number'] < $highestattempted) {
+        $statustext = 'sudah bisa dan sudah kompeten';
     } else {
-        $statustext = get_string('status_kompeten', 'deepdiagnostic');
+        if ($qd['percentage'] <= 0) {
+            $statustext = 'belum kompeten';
+        } elseif ($qd['percentage'] < 50) {
+            $statustext = 'sudah bisa namun belum kompeten';
+        } else {
+            $statustext = 'sudah bisa dan sudah kompeten';
+        }
+        $highesttopic = $qd['topic'];
     }
 
     $results[] = [
-        'number'     => $qz['number'],
-        'topic'      => $qz['topic'],
-        'percentage' => round($percentage, 1),
+        'number'     => $qd['number'],
+        'topic'      => $qd['topic'],
         'statustext' => $statustext,
     ];
 }
