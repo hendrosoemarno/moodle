@@ -3,7 +3,7 @@
 
 require_once(__DIR__ . '/../../config.php');
 
-$id = required_param('id', PARAM_INT); // ID dari course module.
+$id = required_param('id', PARAM_INT);
 $cm = get_coursemodule_from_id('studentreport', $id, 0, false, MUST_EXIST);
 $course = $DB->get_record('course', ['id' => $cm->course], '*', MUST_EXIST);
 $studentreport = $DB->get_record('studentreport', ['id' => $cm->instance], '*', MUST_EXIST);
@@ -19,9 +19,6 @@ $PAGE->set_heading(format_string($course->fullname));
 echo $OUTPUT->header();
 echo $OUTPUT->heading(format_string($studentreport->name));
 
-/** =========================================================================
- * Kumpulkan daftar quiz di course INI sebagai filter
- * ========================================================================= */
 $coursequizids = $DB->get_fieldset_select(
     'quiz',
     'id',
@@ -32,10 +29,6 @@ $coursequizids = $DB->get_fieldset_select(
     ]
 );
 
-
-/** =========================================================================
- * Ambil data dari view (HANYA untuk course saat ini)
- * ========================================================================= */
 $current_userid = $USER->id;
 $raw_records = [];
 
@@ -62,10 +55,7 @@ if (!empty($coursequizids)) {
     $raw_records = $DB->get_records_sql($sql, $params);
 }
 
-/** =========================================================================
- * Ambil nama kategori asli (qc.name) via qc_id (1 query batch)
- * ========================================================================= */
-$qcmap = []; // [qc_id => question_categories.name]
+$qcmap = [];
 if (!empty($raw_records)) {
     $qcids = [];
     foreach ($raw_records as $r) {
@@ -79,43 +69,54 @@ if (!empty($raw_records)) {
         list($insql, $inparams) = $DB->get_in_or_equal($qcids, SQL_PARAMS_NAMED);
         $qcrecs = $DB->get_records_select('question_categories', "id $insql", $inparams, '', 'id, name');
         foreach ($qcrecs as $qr) {
-            $qcmap[(int)$qr->id] = $qr->name; // nama kategori penuh (bisa berisi tag bin/mat)
+            $qcmap[(int)$qr->id] = $qr->name;
         }
     }
 }
 
-/** =========================================================================
- * Deteksi subject berdasarkan tag 'bin' / 'mat'
- * ========================================================================= */
-$detect_subject_by_tag = function(string $text): ?string {
+$subject_map = [
+    'mat'      => 'Matematika',
+    'matlan'   => 'Matematika Lanjut',
+    'bin'      => 'Bahasa Indonesia',
+    'binlan'   => 'Bahasa Indonesia Lanjut',
+    'bing'     => 'Bahasa Inggris',
+    'binglan'  => 'Bahasa Inggris Lanjut',
+    'fis'      => 'Fisika',
+    'kim'      => 'Kimia',
+    'bio'      => 'Biologi',
+    'eko'      => 'Ekonomi',
+    'geo'      => 'Geografi',
+    'sos'      => 'Sosiologi',
+    'sej'      => 'Sejarah',
+];
+
+$detect_subject_by_tag = function(string $text) use ($subject_map): ?string {
     $lc = mb_strtolower(' ' . $text . ' ');
-    if (preg_match('/(^|[\s\-])bin([\s\-\)]|$)/u', $lc)) return 'Bahasa Indonesia';
-    if (preg_match('/(^|[\s\-])mat([\s\-\)]|$)/u', $lc)) return 'Matematika';
+    foreach ($subject_map as $tag => $name) {
+        if (preg_match('/(^|[\s\-])' . preg_quote($tag, '/') . '([\s\-\)]|$)/u', $lc)) {
+            return $name;
+        }
+    }
     return null;
 };
 
-// Bagi data ke dua subject
-$raw_by_subject = [
-    'Matematika' => [],
-    'Bahasa Indonesia' => [],
-];
+$raw_by_subject = [];
+foreach ($subject_map as $tag => $name) {
+    $raw_by_subject[$name] = [];
+}
 
 foreach ($raw_records as $rec) {
     $fullcat = $qcmap[$rec->qc_id] ?? $rec->category_name;
     $subject = $detect_subject_by_tag($fullcat) ?? $detect_subject_by_tag($rec->quiz_name);
-    if ($subject && array_key_exists($subject, $raw_by_subject)) {
+    if ($subject && isset($raw_by_subject[$subject])) {
         $raw_by_subject[$subject][] = $rec;
     }
 }
 
-/** =========================================================================
- * Fungsi pivot + render tabel per subject
- * ========================================================================= */
 $render_subject_table = function(string $subject, array $subject_records) use ($OUTPUT) {
     echo $OUTPUT->heading(format_string($subject), 3);
 
     if (empty($subject_records)) {
-        echo html_writer::div('Tidak ada data laporan untuk ' . s($subject) . ' pada course ini.', 'alert alert-info');
         return;
     }
 
@@ -145,7 +146,6 @@ $render_subject_table = function(string $subject, array $subject_records) use ($
 
     sort($all_categories, SORT_NATURAL | SORT_FLAG_CASE);
 
-    // Tabel
     $table = new html_table();
     $table->attributes = ['class' => 'generaltable'];
     $table->head = ['Nama Kuis'];
@@ -153,7 +153,6 @@ $render_subject_table = function(string $subject, array $subject_records) use ($
         $table->head[] = s($category);
     }
 
-    // Data baris
     $table->data = [];
     foreach ($pivoted_data as $data) {
         $row = [ s($data['quiz_name']) ];
@@ -177,25 +176,28 @@ $render_subject_table = function(string $subject, array $subject_records) use ($
     echo html_writer::table($table);
 };
 
-/** =========================================================================
- * Render dua tabel (atas)
- * ========================================================================= */
-$render_subject_table('Matematika', $raw_by_subject['Matematika']);
+$anydata = false;
+foreach ($subject_map as $tag => $name) {
+    $data = $raw_by_subject[$name] ?? [];
+    if (empty($data)) {
+        continue;
+    }
+    if ($anydata) {
+        echo html_writer::empty_tag('hr', ['class' => 'my-4']);
+    }
+    $render_subject_table($name, $data);
+    $anydata = true;
+}
+
+if (!$anydata) {
+    echo html_writer::div('Tidak ada data laporan untuk course ini.', 'alert alert-info');
+}
+
 echo html_writer::empty_tag('hr', ['class' => 'my-4']);
-$render_subject_table('Bahasa Indonesia', $raw_by_subject['Bahasa Indonesia']);
 
-/** =========================================================================
- * Bagian bawah: render Keterangan Penilaian & Kompetensi BI dari DB (selalu muncul)
- * ========================================================================= */
-
-// Garis pemisah
-echo html_writer::empty_tag('hr', ['class' => 'my-4']);
-
-// 1) Keterangan Penilaian
 if (!empty($studentreport->legend)) {
     echo format_text($studentreport->legend, $studentreport->legendformat ?? FORMAT_HTML, ['context' => $context]);
 } else {
-    // Fallback default singkat jika belum diisi lewat mod_form.
     $legend = new html_table();
     $legend->attributes = ['class' => 'generaltable'];
     $legend->head = ['Persentase Capaian', 'Kategori', 'Makna Umum'];
@@ -212,11 +214,9 @@ if (!empty($studentreport->legend)) {
     );
 }
 
-// 2) Kompetensi Bahasa Indonesia
 if (!empty($studentreport->kompetensi)) {
     echo format_text($studentreport->kompetensi, $studentreport->kompetensiformat ?? FORMAT_HTML, ['context' => $context]);
 } else {
-    // Fallback default singkat jika belum diisi lewat mod_form.
     $out  = html_writer::tag('h4', 'Kompetensi Singkat Membaca Teks', ['class' => 'mb-2']);
     $out .= html_writer::tag('p', 'Silakan isi keterangan kompetensi di pengaturan aktivitas (mod_form).');
     echo html_writer::tag('div', $out, ['class' => 'box generalbox', 'style' => 'max-width:920px;margin:16px 0;']);
