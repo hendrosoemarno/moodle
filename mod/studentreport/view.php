@@ -22,10 +22,11 @@ echo $OUTPUT->heading(format_string($studentreport->name));
 $coursequizids = $DB->get_fieldset_select(
     'quiz',
     'id',
-    'course = :cid AND ' . $DB->sql_like('name', ':qname', false),
+    'course = :cid AND (' . $DB->sql_like('name', ':qname1', false) . ' OR ' . $DB->sql_like('name', ':qname2', false) . ')',
     [
-        'cid'   => $course->id,
-        'qname' => '%Try Out%'
+        'cid'    => $course->id,
+        'qname1' => '%Try Out%',
+        'qname2' => '%Diagnostik%'
     ]
 );
 
